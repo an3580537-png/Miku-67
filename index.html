@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>📱 Private Split-Stream Chat</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #e5ddd5; height: 100vh; display: flex; justify-content: center; align-items: center; }
+        
+        .chat-container { width: 100%; height: 100vh; max-width: 600px; background: #fff; display: flex; flex-direction: column; overflow: hidden; }
+        @media (min-width: 601px) { .chat-container { height: 85vh; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); } }
+
+        /* Header Style */
+        .chat-header { background: #075e54; color: white; padding: 15px; font-weight: bold; display: flex; justify-content: space-between; align-items: center; z-index: 5; }
+        .chat-header .sub { font-size: 0.75em; font-weight: normal; color: #d1eae6; margin-top: 2px; }
+        
+        /* Admin User Selector Dropdown (Hidden for regular users) */
+        #admin-selector-area { display: none; background: #128c7e; padding: 8px 15px; color: white; font-size: 0.9em; align-items: center; gap: 10px; }
+        #active-user-list { background: white; color: #333; border: none; padding: 5px; border-radius: 4px; font-weight: bold; flex: 1; }
+
+        /* Message Log view */
+        #chat-box { flex: 1; padding: 15px; overflow-y: auto; background-image: url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png'); display: flex; flex-direction: column; gap: 10px; -webkit-overflow-scrolling: touch; }
+        
+        /* Message Bubbles */
+        .message { padding: 10px 14px; border-radius: 12px; background: #fff; max-width: 80%; width: fit-content; box-shadow: 0 1px 2px rgba(0,0,0,0.15); font-size: 0.95em; line-height: 1.4; }
+        .message.me { align-self: flex-end; background: #d9fdd3; }
+        .message.them { align-self: flex-start; background: #fff; }
+        .message .meta { font-weight: bold; font-size: 0.7em; color: #666; margin-bottom: 3px; }
+
+        /* Input Deck */
+        .input-area { display: flex; padding: 10px; background: #f0f0f0; gap: 8px; align-items: center; border-top: 1px solid #ddd; }
+        input { padding: 12px; border: 1px solid #ccc; border-radius: 24px; font-size: 16px; outline: none; }
+        #pass-input { width: 100px; text-align: center; }
+        #message-input { flex: 1; }
+        .send-btn { padding: 12px 20px; background: #128c7e; color: white; border: none; border-radius: 24px; cursor: pointer; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div class="chat-container">
+    <div class="chat-header">
+        <div>
+            <div id="header-title">💬 Private Support Chat</div>
+            <div class="sub" id="header-sub">Your messages are completely secure & private</div>
+        </div>
+    </div>
+
+    <div id="admin-selector-area">
+        <label for="active-user-list">Active Chats: </label>
+        <select id="active-user-list" onchange="switchAdminViewTarget()"></select>
+    </div>
+    
+    <div id="chat-box"></div>
+
+    <div class="input-area">
+        <input type="password" id="pass-input" placeholder="🔑 Keys" oninput="checkAdminLogin()">
+        <input type="text" id="message-input" placeholder="Type a message..." onkeypress="handleKeyPress(event)">
+        <button class="send-btn" onclick="sendMessage()">Send</button>
+    </div>
+</div>
+
+<script>
+    // ⚙️ 1. SETUP CREDENTIALS
+    const SUPABASE_URL = 'dhrjrkrcohuntdvbfowh'; 
+    const SUPABASE_ANON_KEY = 'sb_publishable_sxZ1-Lro_N29Eo4CsrpKDw_gEthZKgn';
+    const ADMIN_PASSWORD = 'sb_secret_VZ2zeSLOFaKrX434bGBQoQ_f9xiQmlE'; 
+
+    const supabase = @supabase.supabaseJS.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    
+    // 🏷️ 2. IDENTITY SYSTEM
+    let isAdmin = false;
+    let myUserId = localStorage.getItem('chat_user_id');
+    if (!myUserId) {
+        myUserId = 'User_' + Math.floor(1000 + Math.random() * 9000);
+        localStorage.setItem('chat_user_id', myUserId);
+    }
+
+    let activeRoomId = myUserId; // Regular users only read/write to their own room ID
+    let knownRooms = new Set(); // For admin sorting
+
+    const chatBox = document.getElementById('chat-box');
+    const messageInput = document.getElementById('message-input');
+    const passInput = document.getElementById('pass-input');
+
+    // 🔑 3. ADMIN AUTHORIZATION VERIFICATION
+    function checkAdminLogin() {
+        if (passInput.value === ADMIN_PASSWORD) {
+            isAdmin = true;
+            passInput.style.display = 'none'; // Clear out the layout login box
+            document.getElementById('header-title').innerText = "👑 Master Command Panel";
+            document.getElementById('header-sub').innerText = "Viewing incoming streams safely";
+            document.getElementById('admin-selector-area').style.display = 'flex';
+            
+            loadAllRoomsForAdmin(); 
+        }
+    }
+
+    // 🔄 4. LOAD MESSAGES FROM DATABASE
+    async function loadMessages() {
+        chatBox.innerHTML = ''; // Wipe container clean 
+        
+        let query = supabase.from('messages').select('*');
+        
+        // If regular user, download only messages belonging to their room ID
+        if (!isAdmin) {
+            query = query.eq('room_id', myUserId);
+        } else {
+            query = query.eq('room_id', activeRoomId);
+        }
+
+        const { data, error } = await query.order('created_at', { ascending: true });
+
+        if (error) console.error(error);
+        else data.forEach(msg => displayMessage(msg));
+    }
+
+    // 🛠️ Admin Utility: Populates user dropdown menu list
+    async function loadAllRoomsForAdmin() {
+        const { data } = await supabase.from('messages').select('room_id');
+        const selector = document.getElementById('active-user-list');
+        const oldSelection = selector.value;
+        
+        selector.innerHTML = '';
+        knownRooms.clear();
+        
+        if(data) {
+            data.forEach(row => knownRooms.add(row.room_id));
+        }
+
+        if(knownRooms.size === 0) {
+            selector.innerHTML = `<option value="">No active users yet</option>`;
+            return;
+        }
+
+        knownRooms.forEach(room => {
+            const opt = document.createElement('option');
+            opt.value = room;
+            opt.innerText = room;
+            selector.appendChild(opt);
+        });
+
+        if (oldSelection && knownRooms.has(oldSelection)) {
+            selector.value = oldSelection;
+        } else {
+            activeRoomId = selector.value;
+        }
+        loadMessages();
+    }
+
+    function switchAdminViewTarget() {
+        activeRoomId = document.getElementById('active-user-list').value;
+        loadMessages();
+    }
+
+    // ✨ 5. RENDER TEXT STREAM BUBBLE
+    function displayMessage(msg) {
+        const msgDiv = document.createElement('div');
+        msgDiv.classList.add('message');
+        
+        // Dynamic Alignment Rules
+        if (isAdmin) {
+            if (msg.sender_id === 'Admin') msgDiv.classList.add('me');
+            else msgDiv.classList.add('them');
+        } else {
+            if (msg.sender_id === myUserId) msgDiv.classList.add('me');
+            else msgDiv.classList.add('them');
+        }
+
+        const displayName = (msg.sender_id === 'Admin') ? 'Admin 👑' : msg.username;
+        msgDiv.innerHTML = `<div class="meta">${escapeHTML(displayName)}</div><div>${escapeHTML(msg.text)}</div>`;
+        
+        chatBox.appendChild(msgDiv);
+        chatBox.scrollTop = chatBox.scrollHeight; 
+    }
+
+    // 📤 6. TRANSMIT MESSAGE
+    async function sendMessage() {
+        const text = messageInput.value.trim();
+        if (!text) return;
+
+        messageInput.value = ''; 
+
+        const payload = {
+            sender_id: isAdmin ? 'Admin' : myUserId,
+            room_id: activeRoomId,
+            username: isAdmin ? 'Admin' : myUserId,
+            text: text
+        };
+
+        const { error } = await supabase.from('messages').insert([payload]);
+        if (error) console.error(error);
+    }
+
+    function handleKeyPress(e) { if (e.key === 'Enter') sendMessage(); }
+    function escapeHTML(str) { return str.replace(/[&<>'"]/g, t => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[t] || t)); }
+
+    // 📡 7. STREAM LISTENER REAL-TIME ENGINE
+    supabase
+        .channel('schema-db-changes')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, payload => {
+            const newMsg = payload.new;
+            
+            if (isAdmin) {
+                // If admin detects a brand new room starting up, refresh menu lists
+                if (!knownRooms.has(newMsg.room_id)) {
+                    loadAllRoomsForAdmin();
+                }
+                // Show message if it is for the active room being monitored
+                if (newMsg.room_id === activeRoomId) {
+                    displayMessage(newMsg);
+                }
+            } else {
+                // Regular users only accept messages that belong inside their isolated system channel
+                if (newMsg.room_id === myUserId) {
+                    displayMessage(newMsg);
+                }
+            }
+        })
+        .subscribe();
+
+    loadMessages();
+</script>
+
+</body>
